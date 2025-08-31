@@ -1,0 +1,177 @@
+from flask import Flask, request, render_template_string, jsonify
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms
+from PIL import Image
+import io
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from base64 import b64encode
+
+# Simple CNN for crop disease detection (simulated with 3 classes: healthy, diseased1, diseased2)
+# In real use, load a pre-trained model like from TensorFlow Hub or Hugging Face for plant diseases
+class CropDiseaseCNN(nn.Module):
+    def __init__(self):
+        super(CropDiseaseCNN, self).__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(64 * 56 * 56, 128)  # Assuming input 224x224 after pooling
+        self.fc2 = nn.Linear(128, 3)  # 3 classes for simulation
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = x.view(-1, 64 * 56 * 56)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+# Initialize model (simulated; in practice, load weights)
+model = CropDiseaseCNN()
+model.eval()
+
+# Image transform
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+])
+
+# Sample market data for linear forecast (simulated)
+dates = pd.date_range(start='2020-01-01', periods=100, freq='D')
+prices = np.random.rand(100) * 100 + 50  # Random prices between 50 and 150
+data = pd.DataFrame({'ds': dates, 'y': prices})
+
+def predict_market(periods=30):
+    # Convert dates to numeric for linear fit
+    x = np.arange(len(data))
+    y = data['y'].values
+    # Linear regression using polyfit (degree 1)
+    coeffs = np.polyfit(x, y, 1)
+    # Future x values
+    future_x = np.arange(len(data), len(data) + periods)
+    future_y = coeffs[0] * future_x + coeffs[1]
+    future_dates = pd.date_range(start=data['ds'].max() + pd.Timedelta(days=1), periods=periods, freq='D')
+    
+    # Create plot
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(data['ds'], data['y'], label='Historical Prices')
+    ax.plot(future_dates, future_y, label='Forecasted Prices', linestyle='--')
+    ax.set_title('Market Price Forecast')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Price (Rs)')
+    ax.legend()
+    ax.tick_params(axis='x', rotation=45)
+    
+    # Save plot to base64
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plot_base64 = b64encode(buf.getvalue()).decode('utf-8')
+    plt.close(fig)
+    
+    return plot_base64
+
+app = Flask(__name__)
+
+HTML_TEMPLATE = '''
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgriPulse - Crop Health and Market Forecast</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1, h2 { text-align: center; }
+        form { margin-bottom: 30px; }
+        #health_result { margin-top: 20px; font-weight: bold; }
+        #market_plot { max-width: 100%; height: auto; display: block; margin: 20px auto; }
+    </style>
+</head>
+<body>
+    <h1>AgriPulse: Predict Crop Health and Market Forecast</h1>
+    
+    <h2>Predict Crop Health from Photo</h2>
+    <form id="health_form" method="post" enctype="multipart/form-data">
+        <input type="file" name="photo" accept="image/*" required>
+        <button type="submit">Predict Health</button>
+    </form>
+    <div id="health_result"></div>
+    
+    <h2>Predict Market Forecast</h2>
+    <form id="market_form" method="post">
+        <label for="periods">Number of Days to Forecast:</label>
+        <input type="number" name="periods" value="30" min="1" required>
+        <button type="submit">Forecast Market</button>
+    </form>
+    <img id="market_plot" src="" alt="Market Forecast Plot">
+    
+    <script>
+        // Handle crop health prediction
+        document.getElementById('health_form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            fetch('/predict_health', {
+                method: 'POST',
+                body: formData
+            }).then(response => response.json()).then(data => {
+                document.getElementById('health_result').innerText = 'Predicted Crop Health: ' + data.prediction;
+            }).catch(error => {
+                console.error('Error:', error);
+                document.getElementById('health_result').innerText = 'Error predicting health.';
+            });
+        });
+        
+        // Handle market forecast
+        document.getElementById('market_form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            fetch('/predict_market', {
+                method: 'POST',
+                body: formData
+            }).then(response => response.json()).then(data => {
+                document.getElementById('market_plot').src = 'data:image/png;base64,' + data.plot;
+            }).catch(error => {
+                console.error('Error:', error);
+                document.getElementById('market_plot').src = '';
+            });
+        });
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/predict_health', methods=['POST'])
+def predict_health():
+    if 'photo' not in request.files:
+        return jsonify({'prediction': 'No photo uploaded'}), 400
+    photo = request.files['photo']
+    try:
+        img = Image.open(io.BytesIO(photo.read()))
+        img_tensor = transform(img).unsqueeze(0)  # Add batch dimension
+        with torch.no_grad():
+            output = model(img_tensor)
+            pred = torch.argmax(output, dim=1).item()
+        classes = ['Healthy', 'Diseased - Blight', 'Diseased - Rust']  # Simulated classes
+        return jsonify({'prediction': classes[pred]})
+    except Exception as e:
+        return jsonify({'prediction': f'Error: {str(e)}'}), 500
+
+@app.route('/predict_market', methods=['POST'])
+def predict_market_route():
+    periods = int(request.form.get('periods', 30))
+    try:
+        plot_base64 = predict_market(periods)
+        return jsonify({'plot': plot_base64})
+    except Exception as e:
+        return jsonify({'plot': ''}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
